@@ -7,7 +7,8 @@ import numpy as np
 import pandas as pd
 import pytorch_lightning as pl
 import torch
-from numpy.lib.function_base import flip
+#from numpy.lib.function_base import flip
+from numpy.lib._function_base_impl import flip
 from pytorch_lightning import loggers as pl_loggers
 from pytorch_lightning.callbacks import *
 from torch import nn
@@ -23,6 +24,26 @@ from dist_utils import *
 from lmdb_writer import *
 from metrics import *
 from renderer import *
+
+
+class SizedIterableWrapper:
+    # The constructor accepts a dataloader and a length.
+    # 'dataloader' can be any iterable (like a list, generator, etc.),
+    # and 'length' represents the total number of items it is supposed to yield.
+    def __init__(self, dataloader, length):
+        self.dataloader = dataloader  # Store the provided dataloader
+        self._length = length  # Store the provided length
+
+    # The __iter__ method makes the object iterable.
+    # It returns an iterator for the wrapped dataloader.
+    def __iter__(self):
+        return iter(self.dataloader)
+
+    # The __len__ method returns the stored length.
+    # This is useful when you need to know how many items the dataloader should yield.
+    def __len__(self):
+        return self._length
+
 
 
 class LitModel(pl.LightningModule):
@@ -66,15 +87,29 @@ class LitModel(pl.LightningModule):
             'x_T',
             torch.randn(conf.sample_size, 3, conf.img_size, conf.img_size))
 
-        if conf.pretrain is not None:
-            print(f'loading pretrain ... {conf.pretrain.name}')
-            state = torch.load(conf.pretrain.path, map_location='cpu')
-            print('step:', state['global_step'])
+
+        #if conf.pretrain is not None:
+        #    print(f'loading pretrain ... {conf.pretrain.name}')
+        #    state = torch.load(conf.pretrain.path, map_location='cpu',weights_only=False)
+        #    print('step:', state['global_step'])
+        #    self.load_state_dict(state['state_dict'], strict=False)
+
+        if conf.pretrain is not None:  # Check if a pretrain configuration is provided
+            print(
+                f'loading pretrain ... {conf.pretrain.name}')  # Print the name of the pretrain configuration being loaded
+            # Load the saved model state from the provided path.
+            # 'map_location' is set to 'cpu' to move the loaded tensors to CPU.
+            # 'weights_only=False' ensures the full state (not just the model weights) is loaded.
+            state = torch.load(conf.pretrain.path, map_location='cpu', weights_only=False)
+            print('step:', state['global_step'])  # Print the current global step from the loaded checkpoint state
+            # Load the state dictionary into the model.
+            # 'strict=False' allows for some keys in the model's state dict to be missing or extra.
             self.load_state_dict(state['state_dict'], strict=False)
 
         if conf.latent_infer_path is not None:
             print('loading latent stats ...')
-            state = torch.load(conf.latent_infer_path)
+            # same here, loading stuff
+            state = torch.load(conf.latent_infer_path, weights_only=False)
             self.conds = state['conds']
             self.register_buffer('conds_mean', state['conds_mean'][None, :])
             self.register_buffer('conds_std', state['conds_std'][None, :])
@@ -184,47 +219,119 @@ class LitModel(pl.LightningModule):
         self.val_data = self.train_data
         print('val data:', len(self.val_data))
 
-    def _train_dataloader(self, drop_last=True):
+
+    #def _train_dataloader(self, drop_last=True):
         """
-        really make the dataloader
+        #really make the dataloader
         """
         # make sure to use the fraction of batch size
         # the batch size is global!
+        #conf = self.conf.clone()
+        #conf.batch_size = self.batch_size
+
+        #dataloader = conf.make_loader(self.train_data,
+        #                              shuffle=True,
+        #                              drop_last=drop_last)
+        #return dataloader
+
+    def _train_dataloader(self, drop_last=True):
+        """
+           Really make the dataloader.
+           """
+        if not hasattr(self, "train_data"):
+            self.setup('fit')
+        if not hasattr(self, "train_data"):
+            raise ValueError(
+                "train_data is not initialized even after setup() call. Please ensure setup() properly initializes train_data."
+            )
+
+        # Clone the configuration and set the correct batch size.
         conf = self.conf.clone()
         conf.batch_size = self.batch_size
 
-        dataloader = conf.make_loader(self.train_data,
-                                      shuffle=True,
-                                      drop_last=drop_last)
+        # Create a DataLoader directly instead of make loader, picke issues and multiprocessing
+        dataloader = torch.utils.data.DataLoader(
+            self.train_data,
+            batch_size=conf.batch_size,
+            shuffle=True,
+            drop_last=drop_last,
+            num_workers=0,  # Use 0 on Windows to avoid pickling issues.
+            persistent_workers=False
+        )
         return dataloader
 
-    def train_dataloader(self):
-        """
-        return the dataloader, if diffusion mode => return image dataset
-        if latent mode => return the inferred latent dataset
-        """
-        print('on train dataloader start ...')
-        if self.conf.train_mode.require_dataset_infer():
-            if self.conds is None:
+    #def train_dataloader(self):
+    #    """
+    #    return the dataloader, if diffusion mode => return image dataset
+    #    if latent mode => return the inferred latent dataset
+    #    """
+        #    print('on train dataloader start ...')
+        #if self.conf.train_mode.require_dataset_infer():
+        #    if self.conds is None:
                 # usually we load self.conds from a file
                 # so we do not need to do this again!
-                self.conds = self.infer_whole_dataset()
+        #        self.conds = self.infer_whole_dataset()
                 # need to use float32! unless the mean & std will be off!
                 # (1, c)
-                self.conds_mean.data = self.conds.float().mean(dim=0,
-                                                               keepdim=True)
-                self.conds_std.data = self.conds.float().std(dim=0,
-                                                             keepdim=True)
-            print('mean:', self.conds_mean.mean(), 'std:',
-                  self.conds_std.mean())
+        #        self.conds_mean.data = self.conds.float().mean(dim=0,
+        #                                                       keepdim=True)
+        #        self.conds_std.data = self.conds.float().std(dim=0,
+        #                                                     keepdim=True)
+        #    print('mean:', self.conds_mean.mean(), 'std:',
+        #          self.conds_std.mean())
 
             # return the dataset with pre-calculated conds
-            conf = self.conf.clone()
-            conf.batch_size = self.batch_size
-            data = TensorDataset(self.conds)
-            return conf.make_loader(data, shuffle=True)
-        else:
-            return self._train_dataloader()
+        #   conf = self.conf.clone()
+        #     conf.batch_size = self.batch_size
+        #    data = TensorDataset(self.conds)
+        #    return conf.make_loader(data, shuffle=True)
+        #else:
+        #    return self._train_dataloader()
+
+    def train_dataloader(self):
+            """
+            Return the dataloader:
+              - If in diffusion mode, return an image dataset.
+              - If in latent mode, return the inferred latent dataset.
+            """
+            print('on train dataloader start ...')
+
+            # Check if the current training mode requires dataset inference.
+            if self.conf.train_mode.require_dataset_infer():
+                # If conditions (self.conds) are not already available, compute them.
+                if self.conds is None:
+                    # Infer and set the complete dataset conditions.
+                    # Typically, self.conds might be loaded from a file, avoiding re-computation.
+                    self.conds = self.infer_whole_dataset()
+
+                    # Compute the mean of conditions as float32 to prevent precision issues.
+                    # This is done along dimension 0, preserving the dimension for later operations.
+                    self.conds_mean.data = self.conds.float().mean(dim=0, keepdim=True)
+
+                    # Compute the standard deviation of conditions as float32.
+                    self.conds_std.data = self.conds.float().std(dim=0, keepdim=True)
+
+                # Log the mean and standard deviation values for verification.
+                print('mean:', self.conds_mean.mean(), 'std:', self.conds_std.mean())
+
+                # Clone the current configuration to avoid modifying the original.
+                conf = self.conf.clone()
+
+                # Set the batch size in the cloned configuration.
+                conf.batch_size = self.batch_size
+
+                # Create a TensorDataset from the inferred conditions.
+                data = TensorDataset(self.conds)
+
+                # Use the configuration to create a data loader with shuffling enabled.
+                loader = conf.make_loader(data, shuffle=True)
+
+                # Return a wrapped loader that includes the explicit length of the dataset.
+                return SizedIterableWrapper(loader, len(data)) # PyLightning stuff
+
+            else:
+                # If dataset inference isn't required, use the default training dataloader.
+                return self._train_dataloader()
 
     @property
     def batch_size(self):
@@ -407,8 +514,46 @@ class LitModel(pl.LightningModule):
 
         return {'loss': loss}
 
-    def on_train_batch_end(self, outputs, batch, batch_idx: int,
-                           dataloader_idx: int) -> None:
+   # def on_train_batch_end(self, outputs, batch, batch_idx: int,
+   #                        dataloader_idx: int) -> None:
+   #     """
+        #     after each training step ...
+        #"""
+        #if self.is_last_accum(batch_idx):
+            # only apply ema on the last gradient accumulation step,
+            # if it is the iteration that has optimizer.step()
+        #    if self.conf.train_mode == TrainMode.latent_diffusion:
+                # it trains only the latent hence change only the latent
+        #        ema(self.model.latent_net, self.ema_model.latent_net,
+        #            self.conf.ema_decay)
+        #    else:
+        #        ema(self.model, self.ema_model, self.conf.ema_decay)
+
+            # logging
+        #    if self.conf.train_mode.require_dataset_infer():
+        #        imgs = None
+        #    else:
+        #        imgs = batch['img']
+        #    self.log_sample(x_start=imgs)
+    #    self.evaluate_scores()
+
+    #def on_before_optimizer_step(self, optimizer: Optimizer,
+        #                            optimizer_idx: int) -> None:
+        # fix the fp16 + clip grad norm problem with pytorch lightinng
+        # this is the currently correct way to do it
+        #if self.conf.grad_clip > 0:
+            # from trainer.params_grads import grads_norm, iter_opt_params
+        #    params = [
+        #       p for group in optimizer.param_groups for p in group['params']
+        #    ]
+            # print('before:', grads_norm(iter_opt_params(optimizer)))
+        #    torch.nn.utils.clip_grad_norm_(params,
+    #                                   max_norm=self.conf.grad_clip)
+            # print('after:', grads_norm(iter_opt_params(optimizer)))
+
+
+    # Change in PyLightning framework
+    def on_train_batch_end(self, outputs, batch, batch_idx: int) -> None:
         """
         after each training step ...
         """
@@ -430,19 +575,13 @@ class LitModel(pl.LightningModule):
             self.log_sample(x_start=imgs)
             self.evaluate_scores()
 
-    def on_before_optimizer_step(self, optimizer: Optimizer,
-                                 optimizer_idx: int) -> None:
-        # fix the fp16 + clip grad norm problem with pytorch lightinng
+    # Change in PyLightning framework
+    def on_before_optimizer_step(self, optimizer: Optimizer,**kwargs) -> None:
+        # fix the fp16 + clip grad norm problem with pytorch lightning
         # this is the currently correct way to do it
         if self.conf.grad_clip > 0:
-            # from trainer.params_grads import grads_norm, iter_opt_params
-            params = [
-                p for group in optimizer.param_groups for p in group['params']
-            ]
-            # print('before:', grads_norm(iter_opt_params(optimizer)))
-            torch.nn.utils.clip_grad_norm_(params,
-                                           max_norm=self.conf.grad_clip)
-            # print('after:', grads_norm(iter_opt_params(optimizer)))
+            params = [p for group in optimizer.param_groups for p in group['params']]
+            torch.nn.utils.clip_grad_norm_(params, max_norm=self.conf.grad_clip)
 
     def log_sample(self, x_start):
         """
@@ -904,7 +1043,7 @@ def train(conf: TrainConfig, gpus, nodes=1, mode: str = 'train'):
                                              version='')
 
     # from pytorch_lightning.
-
+    """
     plugins = []
     if len(gpus) == 1 and nodes == 1:
         accelerator = None
@@ -933,9 +1072,58 @@ def train(conf: TrainConfig, gpus, nodes=1, mode: str = 'train'):
         accumulate_grad_batches=conf.accum_batches,
         plugins=plugins,
     )
+    """
+
+    if len(gpus) == 1 and nodes == 1:
+        accelerator = 'cuda'
+        trainer_kwargs = {}
+        plugins = None
+
+    else:
+        accelerator = 'ddp'
+        # For PyTorch Lightning 2.x
+        from pytorch_lightning.strategies import DDPStrategy
+
+        # important for working with gradient checkpoint
+        plugins = []  # Keep your existing plugins list initialization
+        trainer_kwargs = {
+            'strategy': DDPStrategy(find_unused_parameters=False)
+        }
+
+    use_dist_sampler = True if (len(gpus) >= 2 or nodes >= 2) else False
+
+    trainer = pl.Trainer(
+        max_steps=conf.total_samples // conf.batch_size_effective,
+        devices=gpus,
+        num_nodes=nodes,
+        accelerator=accelerator,
+        precision=16 if conf.fp16 else 32,
+        callbacks=[
+            checkpoint,
+            LearningRateMonitor(),
+        ],
+        use_distributed_sampler=use_dist_sampler,
+        logger=tb_logger,
+        accumulate_grad_batches=conf.accum_batches,
+        plugins=plugins if len(gpus) > 1 else None,
+        **trainer_kwargs if 'trainer_kwargs' in locals() else {},  # Add this line
+    )
 
     if mode == 'train':
-        trainer.fit(model)
+
+        # Get the train dataloader from your model
+        train_loader = model.train_dataloader()
+        # If multiple loaders are returned, manually create a CombinedLoader and prime it.
+        if isinstance(train_loader, (list, dict)):
+            from pytorch_lightning.utilities.data import CombinedLoader
+
+            combined = CombinedLoader(train_loader, mode="max_size_cycle")
+            _ = iter(combined)  # This ensures internal state is set
+
+        trainer.fit(model, ckpt_path=resume)
+
+        #trainer.fit(model)
+        
     elif mode == 'eval':
         # load the latest checkpoint
         # perform lpips
