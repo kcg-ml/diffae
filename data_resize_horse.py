@@ -55,6 +55,9 @@ class ConvertDataset(Dataset):
         bytes = resize_and_convert(img, 256, Image.LANCZOS, quality=90)
         return bytes
 
+# Define a top-level collate function instead of using a lambda to avoid pickling issues
+def collate_fn(batch):
+    return batch
 
 if __name__ == "__main__":
     """
@@ -71,7 +74,7 @@ if __name__ == "__main__":
     loader = DataLoader(dataset,
                         batch_size=50,
                         num_workers=16,
-                        collate_fn=lambda x: x)
+                        collate_fn=collate_fn)
 
     target = os.path.expanduser(out_path)
     if os.path.exists(target):
