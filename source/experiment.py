@@ -19,7 +19,6 @@ def parse_args():
     return parser.parse_args()
 
 def load_config(config_path):
-    # This is a placeholder - you'll need to implement config loading based on your actual config format
     from config import TrainConfig
     import importlib.util
     
